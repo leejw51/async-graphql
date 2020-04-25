@@ -7,7 +7,6 @@ use futures::Stream;
 use graphql_parser::Pos;
 use std::borrow::Cow;
 use std::pin::Pin;
-use std::sync::Arc;
 
 /// Empty subscription
 ///
@@ -41,7 +40,7 @@ impl SubscriptionType for EmptySubscription {
         &self,
         _ctx: &Context<'_>,
         _schema: &Schema<Query, Mutation, Self>,
-        _environment: Arc<Environment>,
+        _environment: Environment,
     ) -> Result<Pin<Box<dyn Stream<Item = serde_json::Value> + Send>>>
     where
         Query: ObjectType + Send + Sync + 'static,

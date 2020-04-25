@@ -4,7 +4,6 @@ use crate::{
     do_resolve, registry, Context, ContextSelectionSet, Error, ObjectType, OutputValueType, Pos,
     QueryError, Result, Type,
 };
-use graphql_parser::query::Field;
 use inflector::Inflector;
 use itertools::Itertools;
 use std::borrow::Cow;
@@ -142,13 +141,13 @@ impl<T: OutputValueType + Send + Sync, E: ObjectType + Sync + Send> Type for Con
 impl<T: OutputValueType + Send + Sync, E: ObjectType + Sync + Send> ObjectType
     for Connection<T, E>
 {
-    async fn resolve_field(&self, ctx: &Context<'_>, field: &Field) -> Result<serde_json::Value> {
-        if field.name.as_str() == "pageInfo" {
-            let ctx_obj = ctx.with_selection_set(&field.selection_set);
+    async fn resolve_field(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        if ctx.name.as_str() == "pageInfo" {
+            let ctx_obj = ctx.with_selection_set(&ctx.selection_set);
             let page_info = &self.page_info;
-            return OutputValueType::resolve(page_info, &ctx_obj, field.position).await;
-        } else if field.name.as_str() == "edges" {
-            let ctx_obj = ctx.with_selection_set(&field.selection_set);
+            return OutputValueType::resolve(page_info, &ctx_obj, ctx.position).await;
+        } else if ctx.name.as_str() == "edges" {
+            let ctx_obj = ctx.with_selection_set(&ctx.selection_set);
             let edges = self
                 .nodes
                 .iter()
@@ -158,23 +157,23 @@ impl<T: OutputValueType + Send + Sync, E: ObjectType + Sync + Send> ObjectType
                     node,
                 })
                 .collect_vec();
-            return OutputValueType::resolve(&edges, &ctx_obj, field.position).await;
-        } else if field.name.as_str() == "totalCount" {
+            return OutputValueType::resolve(&edges, &ctx_obj, ctx.position).await;
+        } else if ctx.name.as_str() == "totalCount" {
             return Ok(self
                 .total_count
                 .map(|n| (n as i32).into())
                 .unwrap_or_else(|| serde_json::Value::Null));
-        } else if field.name.as_str() == T::type_name().to_plural().to_camel_case() {
-            let ctx_obj = ctx.with_selection_set(&field.selection_set);
+        } else if ctx.name.as_str() == T::type_name().to_plural().to_camel_case() {
+            let ctx_obj = ctx.with_selection_set(&ctx.selection_set);
             let items = self.nodes.iter().map(|(_, _, item)| item).collect_vec();
-            return OutputValueType::resolve(&items, &ctx_obj, field.position).await;
+            return OutputValueType::resolve(&items, &ctx_obj, ctx.position).await;
         }
 
         Err(Error::Query {
-            pos: field.position,
+            pos: ctx.position,
             path: None,
             err: QueryError::FieldNotFound {
-                field_name: field.name.clone(),
+                field_name: ctx.name.clone(),
                 object: Connection::<T, E>::type_name().to_string(),
             },
         })

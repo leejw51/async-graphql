@@ -234,13 +234,12 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
                             async move {
                                 let resolve_id = std::sync::atomic::AtomicUsize::default();
                                 let ctx_selection_set = environment.create_context(
-                                    &schema,
-                                    Some(#crate_name::QueryPathNode {
-                                        parent: None,
-                                        segment: #crate_name::QueryPathSegment::Name("time"),
-                                    }),
+                                    &schema.registry(),
+                                    &schema.data(),
+                                    None,
                                     &*field_selection_set,
                                     &resolve_id,
+                                    None,
                                 );
                                 #crate_name::OutputValueType::resolve(&msg, &ctx_selection_set, pos).await
                             }
@@ -293,7 +292,7 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
                 &self,
                 ctx: &#crate_name::Context<'_>,
                 schema: &#crate_name::Schema<Query, Mutation, Self>,
-                environment: std::sync::Arc<#crate_name::Environment>,
+                environment: #crate_name::Environment,
             ) -> #crate_name::Result<std::pin::Pin<Box<dyn #crate_name::futures::Stream<Item = #crate_name::serde_json::Value> + Send>>>
             where
                 Query: #crate_name::ObjectType + Send + Sync + 'static,

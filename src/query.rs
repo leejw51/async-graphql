@@ -1,10 +1,12 @@
-use crate::context::Data;
+use crate::context::{Data, DeferFutureVec, EnvironmentInner};
 use crate::error::ParseRequestError;
 use crate::mutation_resolver::do_mutation_resolve;
 use crate::registry::CacheControl;
 use crate::validation::{check_rules, CheckResult};
-use crate::{do_resolve, ContextBase, Error, Result, Schema};
+use crate::{do_resolve, ContextBase, Environment, Error, Result, Schema, SubscriptionType};
 use crate::{ObjectType, QueryError, Variables};
+use futures::lock::Mutex;
+use futures::{Stream, StreamExt};
 use graphql_parser::query::{
     Definition, Document, OperationDefinition, SelectionSet, VariableDefinition,
 };
@@ -14,6 +16,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use tempdir::TempDir;
 
 /// IntoQueryBuilder options
@@ -46,6 +49,9 @@ pub trait IntoQueryBuilder: Sized {
 
 /// Query response
 pub struct QueryResponse {
+    /// Path for subsequent response
+    pub path: Option<serde_json::Value>,
+
     /// Data of query result
     pub data: serde_json::Value,
 
@@ -54,6 +60,12 @@ pub struct QueryResponse {
 
     /// Cache control value
     pub cache_control: CacheControl,
+}
+
+impl QueryResponse {
+    pub(crate) fn merge(&mut self, resp: QueryResponse) {
+        todo!()
+    }
 }
 
 /// Query builder
@@ -121,14 +133,67 @@ impl QueryBuilder {
             .set_upload(var_path, filename, content_type, path);
     }
 
-    /// Execute the query.
+    /// Execute the query, returns a stream, the first result being the query result,
+    /// followed by the incremental result. Only when there are @defer and @stream directives
+    /// in the query will there be subsequent incremental results.
+    pub async fn execute_stream<Query, Mutation, Subscription>(
+        self,
+        schema: &Schema<Query, Mutation, Subscription>,
+    ) -> impl Stream<Item = Result<QueryResponse>>
+    where
+        Query: ObjectType + Send + Sync + 'static,
+        Mutation: ObjectType + Send + Sync + 'static,
+        Subscription: SubscriptionType + Send + Sync + 'static,
+    {
+        let schema = schema.clone();
+        let stream = async_stream::try_stream! {
+            let (first_resp, defer_list) = self.execute_first(&schema).await?;
+            yield first_resp;
+
+            let mut current_defer_list = defer_list.0;
+
+            loop {
+                let mut new_defer_list = Vec::new();
+                for defer in current_defer_list {
+                    let mut res = defer.await?;
+                    new_defer_list.extend((res.1).0);
+                    yield res.0;
+                }
+                if new_defer_list.is_empty() {
+                    break;
+                }
+                current_defer_list = new_defer_list;
+            }
+        };
+        Box::pin(stream)
+    }
+
+    /// Execute the query, always return a complete result
     pub async fn execute<Query, Mutation, Subscription>(
         self,
         schema: &Schema<Query, Mutation, Subscription>,
     ) -> Result<QueryResponse>
     where
-        Query: ObjectType + Send + Sync,
-        Mutation: ObjectType + Send + Sync,
+        Query: ObjectType + Send + Sync + 'static,
+        Mutation: ObjectType + Send + Sync + 'static,
+        Subscription: SubscriptionType + Send + Sync + 'static,
+    {
+        let mut stream = self.execute_stream(schema).await;
+        let mut resp = stream.next().await.unwrap()?;
+        while let Some(resp_part) = stream.next().await.transpose()? {
+            resp.merge(resp_part);
+        }
+        Ok(resp)
+    }
+
+    async fn execute_first<Query, Mutation, Subscription>(
+        self,
+        schema: &Schema<Query, Mutation, Subscription>,
+    ) -> Result<(QueryResponse, DeferFutureVec)>
+    where
+        Query: ObjectType + Send + Sync + 'static,
+        Mutation: ObjectType + Send + Sync + 'static,
+        Subscription: SubscriptionType + Send + Sync + 'static,
     {
         // create extension instances
         let extensions = schema
@@ -168,10 +233,16 @@ impl QueryBuilder {
         }
 
         // execute
-        let resolve_id = AtomicUsize::default();
         let mut fragments = HashMap::new();
+        for definition in &document.definitions {
+            if let Definition::Fragment(fragment) = &definition {
+                fragments.insert(fragment.name.clone(), fragment.clone());
+            }
+        }
+
+        let resolve_id = AtomicUsize::default();
         let (selection_set, variable_definitions, is_query) =
-            current_operation(&document, self.operation_name.as_deref()).ok_or_else(|| {
+            current_operation(document, self.operation_name.as_deref()).ok_or_else(|| {
                 Error::Query {
                     pos: Pos::default(),
                     path: None,
@@ -179,23 +250,23 @@ impl QueryBuilder {
                 }
             })?;
 
-        for definition in &document.definitions {
-            if let Definition::Fragment(fragment) = &definition {
-                fragments.insert(fragment.name.clone(), fragment.clone());
-            }
-        }
+        let env = Environment::new(EnvironmentInner {
+            variables: self.variables,
+            variable_definitions,
+            fragments,
+            ctx_data: Arc::new(self.ctx_data.unwrap_or_default()),
+        });
 
+        let defer_list = Mutex::new(DeferFutureVec::default());
         let ctx = ContextBase {
             path_node: None,
             resolve_id: &resolve_id,
             extensions: &extensions,
-            item: selection_set,
-            variables: &self.variables,
-            variable_definitions,
+            item: &selection_set,
             registry: &schema.0.registry,
             data: &schema.0.data,
-            ctx_data: self.ctx_data.as_ref(),
-            fragments: &fragments,
+            env: &env,
+            defer_list: Some(&defer_list),
         };
 
         extensions.iter().for_each(|e| e.execution_start());
@@ -207,6 +278,7 @@ impl QueryBuilder {
         extensions.iter().for_each(|e| e.execution_end());
 
         let res = QueryResponse {
+            path: None,
             data,
             extensions: if !extensions.is_empty() {
                 Some(
@@ -220,37 +292,33 @@ impl QueryBuilder {
             },
             cache_control,
         };
-        Ok(res)
+        Ok((res, defer_list.into_inner()))
     }
 }
 
 fn current_operation<'a>(
-    document: &'a Document,
+    document: Document,
     operation_name: Option<&str>,
-) -> Option<(&'a SelectionSet, &'a [VariableDefinition], bool)> {
-    for definition in &document.definitions {
+) -> Option<(SelectionSet, Vec<VariableDefinition>, bool)> {
+    for definition in document.definitions {
         match definition {
             Definition::Operation(operation_definition) => match operation_definition {
                 OperationDefinition::SelectionSet(s) => {
-                    return Some((s, &[], true));
+                    return Some((s, Vec::new(), true));
                 }
                 OperationDefinition::Query(query)
                     if query.name.is_none()
                         || operation_name.is_none()
                         || query.name.as_deref() == operation_name.as_deref() =>
                 {
-                    return Some((&query.selection_set, &query.variable_definitions, true));
+                    return Some((query.selection_set, query.variable_definitions, true));
                 }
                 OperationDefinition::Mutation(mutation)
                     if mutation.name.is_none()
                         || operation_name.is_none()
                         || mutation.name.as_deref() == operation_name.as_deref() =>
                 {
-                    return Some((
-                        &mutation.selection_set,
-                        &mutation.variable_definitions,
-                        false,
-                    ));
+                    return Some((mutation.selection_set, mutation.variable_definitions, false));
                 }
                 OperationDefinition::Subscription(subscription)
                     if subscription.name.is_none()

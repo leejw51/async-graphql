@@ -60,18 +60,18 @@ impl Serialize for GQLResponse {
         match &self.0 {
             Ok(res) => {
                 let mut map = serializer.serialize_map(None)?;
-                map.serialize_key("data")?;
-                map.serialize_value(&res.data)?;
+                if res.path.is_some() {
+                    map.serialize_entry("path", &res.path)?;
+                }
+                map.serialize_entry("data", &res.data)?;
                 if res.extensions.is_some() {
-                    map.serialize_key("extensions")?;
-                    map.serialize_value(&res.extensions)?;
+                    map.serialize_entry("extensions", &res.extensions)?;
                 }
                 map.end()
             }
             Err(err) => {
                 let mut map = serializer.serialize_map(None)?;
-                map.serialize_key("errors")?;
-                map.serialize_value(&GQLError(err))?;
+                map.serialize_entry("errors", &GQLError(err))?;
                 map.end()
             }
         }
@@ -214,6 +214,7 @@ mod tests {
     #[test]
     fn test_response_data() {
         let resp = GQLResponse(Ok(QueryResponse {
+            path: None,
             data: json!({"ok": true}),
             extensions: None,
             cache_control: Default::default(),

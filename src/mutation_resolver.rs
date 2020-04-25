@@ -8,7 +8,7 @@ type BoxMutationFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a
 
 #[allow(missing_docs)]
 pub async fn do_mutation_resolve<'a, T: ObjectType + Send + Sync>(
-    ctx: &'a ContextSelectionSet<'a>,
+    ctx: &ContextSelectionSet<'a>,
     root: &'a T,
 ) -> Result<serde_json::Value> {
     let mut values = serde_json::Map::new();
@@ -83,7 +83,7 @@ fn do_resolve<'a, T: ObjectType + Send + Sync>(
                             .for_each(|e| e.resolve_field_start(&resolve_info));
                     }
 
-                    let value = root.resolve_field(&ctx_field, field).await?;
+                    let value = root.resolve_field(&ctx_field).await?;
                     values.insert(field_name, value);
 
                     if !ctx_field.extensions.is_empty() {
@@ -98,8 +98,10 @@ fn do_resolve<'a, T: ObjectType + Send + Sync>(
                         continue;
                     }
 
-                    if let Some(fragment) =
-                        ctx.fragments.get(fragment_spread.fragment_name.as_str())
+                    if let Some(fragment) = ctx
+                        .env
+                        .fragments
+                        .get(fragment_spread.fragment_name.as_str())
                     {
                         do_resolve(
                             &ctx.with_selection_set(&fragment.selection_set),

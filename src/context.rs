@@ -1,7 +1,9 @@
 use crate::extensions::BoxExtension;
 use crate::registry::Registry;
-use crate::{InputValueType, Pos, QueryError, Result, Schema, Type};
+use crate::{InputValueType, Pos, QueryError, QueryResponse, Result, Type};
 use fnv::FnvHashMap;
+use futures::lock::Mutex;
+use futures::Future;
 use graphql_parser::query::{
     Directive, Field, FragmentDefinition, SelectionSet, Value, VariableDefinition,
 };
@@ -9,6 +11,7 @@ use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
@@ -222,6 +225,14 @@ impl<'a> QueryPathNode<'a> {
     }
 }
 
+#[doc(hidden)]
+pub type BoxDeferFuture =
+    Pin<Box<dyn Future<Output = Result<(QueryResponse, DeferFutureVec)>> + Send + 'static>>;
+
+#[doc(hidden)]
+#[derive(Default)]
+pub struct DeferFutureVec(pub Vec<BoxDeferFuture>);
+
 /// Query context
 #[derive(Clone)]
 pub struct ContextBase<'a, T> {
@@ -230,12 +241,10 @@ pub struct ContextBase<'a, T> {
     pub(crate) resolve_id: &'a AtomicUsize,
     pub(crate) extensions: &'a [BoxExtension],
     pub(crate) item: T,
-    pub(crate) variables: &'a Variables,
-    pub(crate) variable_definitions: &'a [VariableDefinition],
-    pub(crate) registry: &'a Registry,
-    pub(crate) data: &'a Data,
-    pub(crate) ctx_data: Option<&'a Data>,
-    pub(crate) fragments: &'a HashMap<String, FragmentDefinition>,
+    pub(crate) registry: &'a Arc<Registry>,
+    pub(crate) data: &'a Arc<Data>,
+    pub(crate) env: &'a Environment,
+    pub(crate) defer_list: Option<&'a Mutex<DeferFutureVec>>,
 }
 
 impl<'a, T> Deref for ContextBase<'a, T> {
@@ -247,33 +256,50 @@ impl<'a, T> Deref for ContextBase<'a, T> {
 }
 
 #[doc(hidden)]
-pub struct Environment {
+pub struct EnvironmentInner {
     pub variables: Variables,
     pub variable_definitions: Vec<VariableDefinition>,
     pub fragments: HashMap<String, FragmentDefinition>,
     pub ctx_data: Arc<Data>,
 }
 
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct Environment(Arc<EnvironmentInner>);
+
+impl Deref for Environment {
+    type Target = EnvironmentInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl Environment {
     #[doc(hidden)]
-    pub fn create_context<'a, T, Query, Mutation, Subscription>(
+    pub fn new(inner: EnvironmentInner) -> Self {
+        Self(Arc::new(inner))
+    }
+
+    #[doc(hidden)]
+    pub fn create_context<'a, T>(
         &'a self,
-        schema: &'a Schema<Query, Mutation, Subscription>,
+        registry: &'a Arc<Registry>,
+        data: &'a Arc<Data>,
         path_node: Option<QueryPathNode<'a>>,
         item: T,
         resolve_id: &'a AtomicUsize,
+        defer_list: Option<&'a Mutex<DeferFutureVec>>,
     ) -> ContextBase<'a, T> {
         ContextBase {
             path_node,
             resolve_id,
             extensions: &[],
             item,
-            variables: &self.variables,
-            variable_definitions: &self.variable_definitions,
-            registry: &schema.0.registry,
-            data: &schema.0.data,
-            ctx_data: Some(&self.ctx_data),
-            fragments: &self.fragments,
+            registry,
+            data,
+            env: self,
+            defer_list,
         }
     }
 }
@@ -300,12 +326,10 @@ impl<'a, T> ContextBase<'a, T> {
             extensions: self.extensions,
             item: field,
             resolve_id: self.resolve_id,
-            variables: self.variables,
-            variable_definitions: self.variable_definitions,
             registry: self.registry,
             data: self.data,
-            ctx_data: self.ctx_data,
-            fragments: self.fragments,
+            env: self.env,
+            defer_list: self.defer_list.clone(),
         }
     }
 
@@ -319,12 +343,10 @@ impl<'a, T> ContextBase<'a, T> {
             extensions: self.extensions,
             item: selection_set,
             resolve_id: self.resolve_id,
-            variables: self.variables,
-            variable_definitions: self.variable_definitions,
             registry: self.registry,
             data: self.data,
-            ctx_data: self.ctx_data,
-            fragments: self.fragments,
+            env: self.env,
+            defer_list: self.defer_list,
         }
     }
 
@@ -336,19 +358,22 @@ impl<'a, T> ContextBase<'a, T> {
 
     /// Gets the global data defined in the `Context` or `Schema`, returns `None` if the specified type data does not exist.
     pub fn data_opt<D: Any + Send + Sync>(&self) -> Option<&D> {
-        self.ctx_data
-            .and_then(|ctx_data| ctx_data.0.get(&TypeId::of::<D>()))
+        self.env
+            .ctx_data
+            .0
+            .get(&TypeId::of::<D>())
             .or_else(|| self.data.0.get(&TypeId::of::<D>()))
             .and_then(|d| d.downcast_ref::<D>())
     }
 
     fn var_value(&self, name: &str, pos: Pos) -> Result<Value> {
         let def = self
+            .env
             .variable_definitions
             .iter()
             .find(|def| def.name == name);
         if let Some(def) = def {
-            if let Some(var_value) = self.variables.get(&def.name) {
+            if let Some(var_value) = self.env.variables.get(&def.name) {
                 return Ok(var_value.clone());
             } else if let Some(default) = &def.default_value {
                 return Ok(default.clone());
@@ -381,6 +406,16 @@ impl<'a, T> ContextBase<'a, T> {
             }
             _ => Ok(value),
         }
+    }
+
+    #[doc(hidden)]
+    pub fn is_defer(&self, directives: &[Directive]) -> bool {
+        for directive in directives {
+            if directive.name == "defer" {
+                return true;
+            }
+        }
+        false
     }
 
     #[doc(hidden)]
@@ -461,12 +496,10 @@ impl<'a> ContextBase<'a, &'a SelectionSet> {
             extensions: self.extensions,
             item: self.item,
             resolve_id: self.resolve_id,
-            variables: self.variables,
-            variable_definitions: self.variable_definitions,
             registry: self.registry,
             data: self.data,
-            ctx_data: self.ctx_data,
-            fragments: self.fragments,
+            env: self.env,
+            defer_list: self.defer_list,
         }
     }
 }

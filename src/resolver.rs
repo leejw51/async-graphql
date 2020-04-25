@@ -1,13 +1,19 @@
 use crate::base::BoxFieldFuture;
+use crate::context::{BoxDeferFuture, DeferFutureVec};
 use crate::extensions::ResolveInfo;
-use crate::{ContextSelectionSet, Error, ObjectType, QueryError, Result};
+use crate::registry::Registry;
+use crate::{
+    ContextSelectionSet, Environment, Error, ObjectType, QueryError, QueryResponse, Result,
+};
+use futures::lock::Mutex;
 use futures::{future, TryFutureExt};
 use graphql_parser::query::{Selection, TypeCondition};
 use std::iter::FromIterator;
+use std::sync::atomic::AtomicUsize;
 
 #[allow(missing_docs)]
 pub async fn do_resolve<'a, T: ObjectType + Send + Sync>(
-    ctx: &'a ContextSelectionSet<'a>,
+    ctx: &ContextSelectionSet<'a>,
     root: &'a T,
 ) -> Result<serde_json::Value> {
     let mut futures = Vec::new();
@@ -92,10 +98,43 @@ pub fn collect_fields<'a, T: ObjectType + Send + Sync>(
                                 .for_each(|e| e.resolve_field_start(&resolve_info));
                         }
 
-                        let res = root
-                            .resolve_field(&ctx_field, field)
-                            .map_ok(move |value| (field_name, value))
-                            .await?;
+                        let res = if let (Some(defer_list), true) =
+                            (ctx.defer_list, ctx.is_defer(&field.directives))
+                        {
+                            // Add to defer list
+                            let path = ctx_field.path_node.as_ref().unwrap().to_json();
+                            let env = ctx_field.env.clone();
+                            let registry = ctx_field.registry.clone();
+                            let data = ctx_field.data.clone();
+                            let field = field.clone(); // TODO: It is best to avoid cloning, but this requires modifying the AST structure
+                            let resolve_id = AtomicUsize::default();
+                            let next_defer_list = Mutex::new(DeferFutureVec::default());
+                            let fut: BoxDeferFuture = Box::pin(async move {
+                                let ctx_field = env.create_context(
+                                    &registry,
+                                    &data,
+                                    None,
+                                    &field,
+                                    &resolve_id,
+                                    Some(&next_defer_list),
+                                );
+                                Ok((
+                                    QueryResponse {
+                                        path: Some(path),
+                                        data: root.resolve_field(&ctx_field).await?,
+                                        extensions: None,
+                                        cache_control: Default::default(),
+                                    },
+                                    next_defer_list.into_inner(),
+                                ))
+                            });
+                            defer_list.lock().await.0.push(fut);
+                            (field_name, serde_json::Value::Null)
+                        } else {
+                            root.resolve_field(&ctx_field)
+                                .map_ok(move |value| (field_name, value))
+                                .await?
+                        };
 
                         if !ctx_field.extensions.is_empty() {
                             ctx_field
@@ -106,14 +145,18 @@ pub fn collect_fields<'a, T: ObjectType + Send + Sync>(
 
                         Ok(res)
                     }
-                }))
+                }));
             }
             Selection::FragmentSpread(fragment_spread) => {
                 if ctx.is_skip(&fragment_spread.directives)? {
                     continue;
                 }
 
-                if let Some(fragment) = ctx.fragments.get(fragment_spread.fragment_name.as_str()) {
+                if let Some(fragment) = ctx
+                    .env
+                    .fragments
+                    .get(fragment_spread.fragment_name.as_str())
+                {
                     collect_fields(
                         &ctx.with_selection_set(&fragment.selection_set),
                         root,

@@ -3,7 +3,6 @@ use crate::{Context, ContextSelectionSet, ObjectType, Result, Schema, Type};
 use futures::{Future, Stream};
 use graphql_parser::query::{Selection, TypeCondition};
 use std::pin::Pin;
-use std::sync::Arc;
 
 /// Represents a GraphQL subscription object
 #[async_trait::async_trait]
@@ -19,7 +18,7 @@ pub trait SubscriptionType: Type {
         &self,
         ctx: &Context<'_>,
         schema: &Schema<Query, Mutation, Self>,
-        environment: Arc<Environment>,
+        environment: Environment,
     ) -> Result<Pin<Box<dyn Stream<Item = serde_json::Value> + Send>>>
     where
         Query: ObjectType + Send + Sync + 'static,
@@ -31,7 +30,7 @@ type BoxCreateStreamFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send 
 
 pub fn create_subscription_stream<'a, Query, Mutation, Subscription>(
     schema: &'a Schema<Query, Mutation, Subscription>,
-    environment: Arc<Environment>,
+    environment: Environment,
     ctx: &'a ContextSelectionSet<'_>,
     streams: &'a mut Vec<Pin<Box<dyn Stream<Item = serde_json::Value> + Send>>>,
 ) -> BoxCreateStreamFuture<'a>
@@ -64,8 +63,10 @@ where
                         continue;
                     }
 
-                    if let Some(fragment) =
-                        ctx.fragments.get(fragment_spread.fragment_name.as_str())
+                    if let Some(fragment) = ctx
+                        .env
+                        .fragments
+                        .get(fragment_spread.fragment_name.as_str())
                     {
                         create_subscription_stream(
                             schema,
