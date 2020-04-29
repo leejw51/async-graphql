@@ -119,9 +119,6 @@ where
         subscription: Subscription,
     ) -> SchemaBuilder<Query, Mutation, Subscription> {
         let mut registry = Registry {
-            types: Default::default(),
-            directives: Default::default(),
-            implements: Default::default(),
             query_type: Query::type_name().to_string(),
             mutation_type: if Mutation::is_empty() {
                 None
@@ -133,6 +130,7 @@ where
             } else {
                 Some(Subscription::type_name().to_string())
             },
+            ..Registry::default()
         };
 
         registry.add_directive(Directive {

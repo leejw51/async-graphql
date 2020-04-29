@@ -1,5 +1,140 @@
 use async_graphql::*;
 
+#[test]
+#[should_panic]
+pub fn test_interface_field_type_do_not_match() {
+    #[SimpleObject]
+    struct MyObj {
+        id: i32,
+    }
+
+    #[Interface(field(name = "id", type = "String"))]
+    struct MyInterface(MyObj);
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> MyInterface {
+            unimplemented!()
+        }
+    }
+
+    Schema::new(Query, EmptyMutation, EmptySubscription);
+}
+
+#[test]
+#[should_panic]
+pub fn test_interface_field_does_not_exists() {
+    #[SimpleObject]
+    struct MyObj {
+        id: i32,
+    }
+
+    #[Interface(field(name = "id1", type = "String"))]
+    struct MyInterface(MyObj);
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> MyInterface {
+            unimplemented!()
+        }
+    }
+
+    Schema::new(Query, EmptyMutation, EmptySubscription);
+}
+
+#[test]
+#[should_panic]
+pub fn test_interface_field_number_of_parameters_does_not_match() {
+    struct MyObj;
+
+    #[Object]
+    impl MyObj {
+        #[allow(unused_variables)]
+        async fn value(&self, a: i32) -> String {
+            unimplemented!()
+        }
+    }
+
+    #[Interface(field(
+        name = "value",
+        type = "String",
+        arg(name = "a", type = "i32"),
+        arg(name = "b", type = "i32")
+    ))]
+    struct MyInterface(MyObj);
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> MyInterface {
+            unimplemented!()
+        }
+    }
+
+    Schema::new(Query, EmptyMutation, EmptySubscription);
+}
+
+#[test]
+#[should_panic]
+pub fn test_interface_field_parameter_type_do_not_match() {
+    struct MyObj;
+
+    #[Object]
+    impl MyObj {
+        #[allow(unused_variables)]
+        async fn value(&self, a: i32) -> String {
+            unimplemented!()
+        }
+    }
+
+    #[Interface(field(name = "value", type = "String", arg(name = "a", type = "String")))]
+    struct MyInterface(MyObj);
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> MyInterface {
+            unimplemented!()
+        }
+    }
+
+    Schema::new(Query, EmptyMutation, EmptySubscription);
+}
+
+#[test]
+#[should_panic]
+pub fn test_interface_field_parameter_does_not_exists() {
+    struct MyObj;
+
+    #[Object]
+    impl MyObj {
+        #[allow(unused_variables)]
+        async fn value(&self, a: i32) -> String {
+            unimplemented!()
+        }
+    }
+
+    #[Interface(field(name = "value", type = "String", arg(name = "b", type = "i32")))]
+    struct MyInterface(MyObj);
+
+    struct Query;
+
+    #[Object]
+    impl Query {
+        async fn obj(&self) -> MyInterface {
+            unimplemented!()
+        }
+    }
+
+    Schema::new(Query, EmptyMutation, EmptySubscription);
+}
+
 #[async_std::test]
 pub async fn test_interface_simple_object() {
     #[async_graphql::SimpleObject]
@@ -46,7 +181,6 @@ pub async fn test_interface_simple_object() {
 pub async fn test_interface_simple_object2() {
     #[async_graphql::SimpleObject]
     struct MyObj {
-        #[field(ref)]
         id: i32,
         title: String,
     }

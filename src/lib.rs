@@ -167,6 +167,7 @@ pub use types::{EnumItem, EnumType};
 /// | external      | Mark a field as owned by another service. This allows service A to use fields from service B while also knowing at runtime the types of that field. | bool | Y |
 /// | provides      | Annotate the expected returned fieldset from a field on a base type that is guaranteed to be selectable by the gateway. | string | Y |
 /// | requires      | Annotate the required input fieldset from a base type for a resolver. It is used to develop a query plan where the required fields may not be needed by the client, but the service may need additional information from other services. | string | Y |
+/// | flatten       | Flatten the contents of this field into the container it is defined in, the behavior is the same as in the serde. | bool | Y |
 ///
 /// # Field argument parameters
 ///
@@ -274,6 +275,7 @@ pub use async_graphql_derive::Object;
 /// | external      | Mark a field as owned by another service. This allows service A to use fields from service B while also knowing at runtime the types of that field. | bool | Y |
 /// | provides      | Annotate the expected returned fieldset from a field on a base type that is guaranteed to be selectable by the gateway. | string | Y |
 /// | requires      | Annotate the required input fieldset from a base type for a resolver. It is used to develop a query plan where the required fields may not be needed by the client, but the service may need additional information from other services. | string | Y |
+/// | flatten       | Flatten the contents of this field into the container it is defined in, the behavior is the same as in the serde. | bool | Y |
 ///
 /// # Examples
 ///
@@ -312,7 +314,6 @@ pub use async_graphql_derive::SimpleObject;
 /// | name        | Item name                 | string   | Y        |
 /// | desc        | Item description          | string   | Y        |
 /// | deprecation | Item deprecation reason   | string   | Y        |
-/// | ref         | The resolver function returns a borrowing value  | bool   | Y        |
 ///
 /// # Examples
 ///
@@ -432,7 +433,6 @@ pub use async_graphql_derive::InputObject;
 /// | name        | Argument name             | string   | N        |
 /// | type        | Argument type             | string   | N        |
 /// | desc        | Argument description      | string   | Y        |
-/// | default     | Argument default value    | string   | Y        |
 ///
 /// # Define an interface
 ///

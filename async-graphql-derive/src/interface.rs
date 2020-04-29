@@ -1,10 +1,9 @@
 use crate::args;
 use crate::args::{InterfaceField, InterfaceFieldArgument};
 use crate::output_type::OutputType;
-use crate::utils::{build_value_repr, check_reserved_name, get_crate_name};
+use crate::utils::{check_reserved_name, get_crate_name};
 use inflector::Inflector;
 use proc_macro::TokenStream;
-use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::{Data, DeriveInput, Error, Fields, Result, Type};
 
@@ -39,6 +38,7 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
         .unwrap_or_else(|| quote! {None});
     let mut registry_types = Vec::new();
     let mut possible_types = Vec::new();
+    let mut resolvers = Vec::new();
     let mut collect_inline_fields = Vec::new();
     let mut get_introspection_typename = Vec::new();
 
@@ -65,6 +65,12 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
                     possible_types.insert(<#p as #crate_name::Type>::type_name().to_string());
                 });
 
+                resolvers.push(quote! {
+                    if let #ident::#enum_name(obj) = self {
+                        return #crate_name::ObjectType::resolve_field(obj, ctx).await;
+                    }
+                });
+
                 collect_inline_fields.push(quote! {
                     if let #ident::#enum_name(obj) = self {
                         return obj.collect_inline_fields(name, pos, ctx, futures);
@@ -80,9 +86,7 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
         }
     }
 
-    let mut methods = Vec::new();
     let mut schema_fields = Vec::new();
-    let mut resolvers = Vec::new();
 
     for InterfaceField {
         name,
@@ -90,18 +94,12 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
         ty,
         args,
         deprecation,
-        context,
         external,
         provides,
         requires,
     } in &interface_args.fields
     {
-        let method_name = Ident::new(name, Span::call_site());
         let name = name.to_camel_case();
-        let mut calls = Vec::new();
-        let mut use_params = Vec::new();
-        let mut decl_params = Vec::new();
-        let mut get_params = Vec::new();
         let mut schema_args = Vec::new();
         let requires = match &requires {
             Some(requires) => quote! { Some(#requires) },
@@ -112,76 +110,22 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
             None => quote! { None },
         };
 
-        if *context {
-            decl_params.push(quote! { ctx: &'ctx #crate_name::Context<'ctx> });
-            use_params.push(quote! { ctx });
-        }
-
-        for InterfaceFieldArgument {
-            name,
-            desc,
-            ty,
-            default,
-        } in args
-        {
-            let ident = Ident::new(name, Span::call_site());
+        for InterfaceFieldArgument { name, desc, ty } in args {
             let name = name.to_camel_case();
-            decl_params.push(quote! { #ident: #ty });
-            use_params.push(quote! { #ident });
-
-            let param_default = match &default {
-                Some(default) => {
-                    let repr = build_value_repr(&crate_name, &default);
-                    quote! {|| #repr }
-                }
-                None => quote! { || #crate_name::Value::Null },
-            };
-            get_params.push(quote! {
-                let #ident: #ty = ctx.param_value(#name, ctx.position, #param_default)?;
-            });
-
             let desc = desc
                 .as_ref()
                 .map(|s| quote! {Some(#s)})
-                .unwrap_or_else(|| quote! {None});
-            let schema_default = default
-                .as_ref()
-                .map(|v| {
-                    let s = v.to_string();
-                    quote! {Some(#s)}
-                })
                 .unwrap_or_else(|| quote! {None});
             schema_args.push(quote! {
                 args.insert(#name, #crate_name::registry::InputValue {
                     name: #name,
                     description: #desc,
                     ty: <#ty as #crate_name::Type>::create_type_info(registry),
-                    default_value: #schema_default,
+                    default_value: None,
                     validator: None,
                 });
             });
         }
-
-        for enum_name in &enum_names {
-            calls.push(quote! {
-                #ident::#enum_name(obj) => obj.#method_name(#(#use_params),*).await
-            });
-        }
-
-        let ctx_lifetime = if *context {
-            quote! { <'ctx> }
-        } else {
-            quote! {}
-        };
-
-        methods.push(quote! {
-            #[inline]
-            async fn #method_name #ctx_lifetime(&self, #(#decl_params),*) -> #ty {
-                match self {
-                    #(#calls,)*
-                }
-            }
-        });
 
         let desc = desc
             .as_ref()
@@ -212,26 +156,6 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
                 requires: #requires,
             });
         });
-
-        let resolve_obj = match &ty {
-            OutputType::Value(_) => quote! {
-                self.#method_name(#(#use_params),*).await
-            },
-            OutputType::Result(_, _) => {
-                quote! {
-                    self.#method_name(#(#use_params),*).await.
-                        map_err(|err| err.into_error_with_path(ctx.position, ctx.path_node.as_ref().unwrap().to_json()))?
-                }
-            }
-        };
-
-        resolvers.push(quote! {
-            if ctx.name.as_str() == #name {
-                #(#get_params)*
-                let ctx_obj = ctx.with_selection_set(&ctx.selection_set);
-                return #crate_name::OutputValueType::resolve(&#resolve_obj, &ctx_obj, ctx.position).await;
-            }
-        });
     }
 
     let introspection_type_name = if get_introspection_typename.is_empty() {
@@ -250,10 +174,6 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
 
         #(#type_into_impls)*
 
-        impl #generics #ident #generics {
-            #(#methods)*
-        }
-
         impl #generics #crate_name::Type for #ident #generics {
             fn type_name() -> std::borrow::Cow<'static, str> {
                 std::borrow::Cow::Borrowed(#gql_typename)
@@ -264,7 +184,7 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
             }
 
             fn create_type_info(registry: &mut #crate_name::registry::Registry) -> String {
-                registry.create_type::<Self, _>(|registry| {
+                let ty_name = registry.create_type::<Self, _>(|registry| {
                     #(#registry_types)*
 
                     #crate_name::registry::Type::Interface {
@@ -283,7 +203,9 @@ pub fn generate(interface_args: &args::Interface, input: &DeriveInput) -> Result
                         extends: #extends,
                         keys: None,
                     }
-                })
+                });
+                registry.check_interface_implements(#gql_typename);
+                ty_name
             }
         }
 

@@ -214,7 +214,7 @@ pub struct Field {
     pub external: bool,
     pub provides: Option<String>,
     pub requires: Option<String>,
-    pub is_ref: bool,
+    pub flatten: bool,
 }
 
 impl Field {
@@ -226,7 +226,7 @@ impl Field {
         let mut external = false;
         let mut provides = None;
         let mut requires = None;
-        let mut is_ref = false;
+        let mut flatten = false;
 
         for attr in attrs {
             match attr.parse_meta()? {
@@ -239,8 +239,8 @@ impl Field {
                             NestedMeta::Meta(Meta::Path(p)) if p.is_ident("external") => {
                                 external = true;
                             }
-                            NestedMeta::Meta(Meta::Path(p)) if p.is_ident("ref") => {
-                                is_ref = true;
+                            NestedMeta::Meta(Meta::Path(p)) if p.is_ident("flatten") => {
+                                flatten = true;
                             }
                             NestedMeta::Meta(Meta::NameValue(nv)) => {
                                 if nv.path.is_ident("name") {
@@ -311,7 +311,7 @@ impl Field {
             external,
             provides,
             requires,
-            is_ref,
+            flatten,
         }))
     }
 }
@@ -571,7 +571,6 @@ pub struct InterfaceFieldArgument {
     pub name: String,
     pub desc: Option<String>,
     pub ty: Type,
-    pub default: Option<Value>,
 }
 
 impl InterfaceFieldArgument {
@@ -579,7 +578,6 @@ impl InterfaceFieldArgument {
         let mut name = None;
         let mut desc = None;
         let mut ty = None;
-        let mut default = None;
 
         for meta in &ls.nested {
             if let NestedMeta::Meta(Meta::NameValue(nv)) = meta {
@@ -614,29 +612,6 @@ impl InterfaceFieldArgument {
                             "Attribute 'type' should be a string.",
                         ));
                     }
-                } else if nv.path.is_ident("default") {
-                    if let syn::Lit::Str(lit) = &nv.lit {
-                        match parse_value(&lit.value()) {
-                            Ok(Value::Variable(_)) => {
-                                return Err(Error::new_spanned(
-                                    &nv.lit,
-                                    "The default cannot be a variable",
-                                ))
-                            }
-                            Ok(value) => default = Some(value),
-                            Err(err) => {
-                                return Err(Error::new_spanned(
-                                    &nv.lit,
-                                    format!("Invalid value: {}", err),
-                                ));
-                            }
-                        }
-                    } else {
-                        return Err(Error::new_spanned(
-                            &nv.lit,
-                            "Attribute 'default' should be a string.",
-                        ));
-                    }
                 }
             }
         }
@@ -653,7 +628,6 @@ impl InterfaceFieldArgument {
             name: name.unwrap(),
             desc,
             ty: ty.unwrap(),
-            default,
         })
     }
 }
@@ -665,7 +639,6 @@ pub struct InterfaceField {
     pub ty: Type,
     pub args: Vec<InterfaceFieldArgument>,
     pub deprecation: Option<String>,
-    pub context: bool,
     pub external: bool,
     pub provides: Option<String>,
     pub requires: Option<String>,
@@ -678,16 +651,12 @@ impl InterfaceField {
         let mut ty = None;
         let mut args = Vec::new();
         let mut deprecation = None;
-        let mut context = false;
         let mut external = false;
         let mut provides = None;
         let mut requires = None;
 
         for meta in &ls.nested {
             match meta {
-                NestedMeta::Meta(Meta::Path(p)) if p.is_ident("context") => {
-                    context = true;
-                }
                 NestedMeta::Meta(Meta::Path(p)) if p.is_ident("external") => {
                     external = true;
                 }
@@ -773,7 +742,6 @@ impl InterfaceField {
             ty: ty.unwrap(),
             args,
             deprecation,
-            context,
             external,
             requires,
             provides,

@@ -332,6 +332,7 @@ pub struct Directive {
     pub args: HashMap<&'static str, InputValue>,
 }
 
+#[derive(Default)]
 pub struct Registry {
     pub types: HashMap<String, Type>,
     pub directives: HashMap<String, Directive>,
@@ -620,5 +621,61 @@ impl Registry {
                 },
             );
         }
+    }
+
+    #[doc(hidden)]
+    pub fn check_interface_implements(&self, interface_name: &str) {
+        if let Some(Type::Interface { possible_types, .. }) = self.types.get(interface_name) {
+            for obj_name in possible_types {
+                self.check_can_implement(&obj_name, interface_name).unwrap();
+            }
+        }
+    }
+
+    fn check_can_implement(
+        &self,
+        object_name: &str,
+        interface_name: &str,
+    ) -> std::result::Result<(), String> {
+        let object_ty = match self.types.get(object_name) {
+            Some(ty) => ty,
+            None => return Err(format!("Object \"{}\" not exists.", object_name)),
+        };
+        let interface_ty = match self.types.get(interface_name) {
+            Some(ty) => ty,
+            None => return Err(format!("Interface \"{}\" not exists.", interface_name)),
+        };
+        let object_fields = if let Type::Object { fields, .. } = object_ty {
+            fields
+        } else {
+            return Err(format!("Type \"{}\" not an Object.", object_name));
+        };
+
+        if let Type::Interface { fields, .. } = interface_ty {
+            for field in fields.values() {
+                if let Some(obj_field) = object_fields.get(&field.name) {
+                    if obj_field.ty != field.ty {
+                        return Err(format!("Object \"{}\" cannot implement the interface \"{}\", because interface field \"{}\" is expected \"{}\", but object field is \"{}\".", object_name, interface_name, field.name, field.ty, obj_field.ty));
+                    }
+                    if obj_field.args.len() != field.args.len() {
+                        return Err(format!("Object \"{}\" cannot implement the interface \"{}\", because field \"{}\" has different number of arguments", object_name, interface_name, obj_field.name));
+                    }
+
+                    for arg in field.args.values() {
+                        if let Some(obj_arg) = obj_field.args.get(arg.name) {
+                            if obj_arg.ty != arg.ty {
+                                return Err(format!("Object \"{}\" cannot implement the interface \"{}\", because the type of parameter \"{}\" of interface field \"{}\" is expected \"{}\", and the parameter type of the object is \"{}\".", object_name, interface_name, arg.name, field.name, arg.ty, obj_arg.ty));
+                            }
+                        } else {
+                            return Err(format!("Object \"{}\" cannot implement the interface \"{}\", because the parameter \"{}\" for field \"{}\" does not exist.", object_name, interface_name, arg.name, field.name));
+                        }
+                    }
+                } else {
+                    return Err(format!("Object \"{}\" cannot implement the interface \"{}\", because field \"{}\" does not exist.", object_name, interface_name, field.name));
+                }
+            }
+        }
+
+        Ok(())
     }
 }

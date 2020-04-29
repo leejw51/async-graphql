@@ -2,7 +2,7 @@ use graphql_parser::parse_query;
 use graphql_parser::query::{Definition, OperationDefinition, ParseError, Query, Value};
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
-use syn::{Error, Ident, Meta, MetaList, NestedMeta, Result};
+use syn::{Attribute, Error, Ident, Meta, MetaList, NestedMeta, Result};
 
 pub fn get_crate_name(internal: bool) -> TokenStream {
     if internal {
@@ -173,4 +173,14 @@ pub fn parse_validator(crate_name: &TokenStream, args: &MetaList) -> Result<Toke
         }
     }
     Ok(quote! {None})
+}
+
+pub fn remove_field_attr(attrs: &mut Vec<Attribute>) {
+    if let Some((idx, _)) = attrs
+        .iter()
+        .enumerate()
+        .find(|(_, a)| a.path.is_ident("field"))
+    {
+        attrs.remove(idx);
+    }
 }

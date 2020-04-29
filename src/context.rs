@@ -262,7 +262,8 @@ pub struct ContextBase<'a, T> {
     pub(crate) item: T,
     pub(crate) variables: &'a Variables,
     pub(crate) variable_definitions: &'a [VariableDefinition],
-    pub(crate) registry: &'a Registry,
+    #[doc(hidden)]
+    pub registry: &'a Registry,
     pub(crate) data: &'a Data,
     pub(crate) ctx_data: Option<&'a Data>,
     pub(crate) fragments: &'a HashMap<String, FragmentDefinition>,

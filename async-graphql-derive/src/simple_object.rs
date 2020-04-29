@@ -1,5 +1,5 @@
 use crate::args;
-use crate::utils::{check_reserved_name, get_crate_name};
+use crate::utils::{check_reserved_name, get_crate_name, remove_field_attr};
 use inflector::Inflector;
 use proc_macro::TokenStream;
 use quote::quote;
@@ -27,7 +27,6 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
         .map(|s| quote! { Some(#s) })
         .unwrap_or_else(|| quote! {None});
 
-    let mut getters = Vec::new();
     let mut resolvers = Vec::new();
     let mut schema_fields = Vec::new();
     let fields = match &mut s.fields {
@@ -62,7 +61,6 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
                     Some(provides) => quote! { Some(#provides) },
                     None => quote! { None },
                 };
-                let vis = &item.vis;
                 let ty = &item.ty;
 
                 let cache_control = {
@@ -92,22 +90,6 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
 
                 let ident = &item.ident;
 
-                if field.is_ref {
-                    getters.push(quote! {
-                        #[inline]
-                        #vis async fn #ident(&self) -> &#ty {
-                            &self.#ident
-                        }
-                    });
-                } else {
-                    getters.push(quote! {
-                        #[inline]
-                        #vis async fn #ident(&self) -> #ty {
-                            self.#ident.clone()
-                        }
-                    });
-                }
-
                 resolvers.push(quote! {
                     if ctx.name.as_str() == #field_name {
                         let ctx_obj = ctx.with_selection_set(&ctx.selection_set);
@@ -116,14 +98,7 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
                 });
             }
 
-            if let Some((idx, _)) = item
-                .attrs
-                .iter()
-                .enumerate()
-                .find(|(_, a)| a.path.is_ident("field"))
-            {
-                item.attrs.remove(idx);
-            }
+            remove_field_attr(&mut item.attrs);
         }
     }
 
@@ -140,10 +115,6 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
 
     let expanded = quote! {
         #input
-
-        impl #generics #ident #where_clause {
-            #(#getters)*
-        }
 
         impl #generics #crate_name::Type for #ident #generics #where_clause {
             fn type_name() -> std::borrow::Cow<'static, str> {

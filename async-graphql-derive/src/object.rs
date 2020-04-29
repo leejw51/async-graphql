@@ -1,6 +1,6 @@
 use crate::args;
 use crate::output_type::OutputType;
-use crate::utils::{build_value_repr, check_reserved_name, get_crate_name};
+use crate::utils::{build_value_repr, check_reserved_name, get_crate_name, remove_field_attr};
 use inflector::Inflector;
 use proc_macro::TokenStream;
 use quote::quote;
@@ -40,6 +40,7 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
     let mut find_entities = Vec::new();
     let mut add_keys = Vec::new();
     let mut create_entity_types = Vec::new();
+    let mut registry_flatten_types = Vec::new();
 
     for item in &mut item_impl.items {
         if let ImplItem::Method(method) = item {
@@ -203,6 +204,7 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
                         return Err(Error::new_spanned(&method.sig.output, "Missing type"))
                     }
                 };
+                let schema_ty = ty.value_type();
                 let cache_control = {
                     let public = field.cache_control.public;
                     let max_age = field.cache_control.max_age;
@@ -260,6 +262,57 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
                     }
                 }
 
+                let ctx_param = if arg_ctx {
+                    quote! { &ctx, }
+                } else {
+                    quote! {}
+                };
+
+                if field.flatten {
+                    if !args.is_empty() {
+                        return Err(Error::new_spanned(
+                            method,
+                            "Fields of type flatten are not allowed to have arguments",
+                        ));
+                    }
+
+                    registry_flatten_types.push(quote! {
+                        <#schema_ty as #crate_name::Type>::create_type_info(registry);
+                    });
+
+                    schema_fields.push(quote! {
+                        if let Some(#crate_name::registry::Type::Object{ fields: inner_fields, ..}) = registry.types.get(<#schema_ty as #crate_name::Type>::type_name().as_ref()) {
+                            fields.extend(inner_fields.clone());
+                        }
+                    });
+
+                    let field_ident = &method.sig.ident;
+                    let resolve_obj = match &ty {
+                        OutputType::Value(_) => quote! {
+                            self.#field_ident(#ctx_param).await
+                        },
+                        OutputType::Result(_, _) => {
+                            quote! {
+                                {
+                                    let res:#crate_name::FieldResult<_> = self.#field_ident(#ctx_param).await;
+                                    res.map_err(|err| err.into_error_with_path(ctx.position, ctx.path_node.as_ref().unwrap().to_json()))?
+                                }
+                            }
+                        }
+                    };
+
+                    resolvers.push(quote! {
+                        if let Some(#crate_name::registry::Type::Object{ fields: inner_fields, ..}) = ctx.registry.types.get(<#schema_ty as #crate_name::Type>::type_name().as_ref()) {
+                            if inner_fields.contains_key(ctx.name.as_str()) {
+                                return #crate_name::ObjectType::resolve_field(&#resolve_obj, ctx).await;
+                            }
+                        }
+                    });
+
+                    remove_field_attr(&mut method.attrs);
+                    continue;
+                }
+
                 let mut schema_args = Vec::new();
                 let mut use_params = Vec::new();
                 let mut get_params = Vec::new();
@@ -315,8 +368,6 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
                     });
                 }
 
-                let schema_ty = ty.value_type();
-
                 schema_fields.push(quote! {
                     fields.insert(#field_name.to_string(), #crate_name::registry::Field {
                         name: #field_name.to_string(),
@@ -334,12 +385,6 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
                         requires: #requires,
                     });
                 });
-
-                let ctx_param = if arg_ctx {
-                    quote! { &ctx, }
-                } else {
-                    quote! {}
-                };
 
                 let field_ident = &method.sig.ident;
                 let resolve_obj = match &ty {
@@ -364,21 +409,9 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
                     }
                 });
 
-                if let Some((idx, _)) = method
-                    .attrs
-                    .iter()
-                    .enumerate()
-                    .find(|(_, a)| a.path.is_ident("field"))
-                {
-                    method.attrs.remove(idx);
-                }
-            } else if let Some((idx, _)) = method
-                .attrs
-                .iter()
-                .enumerate()
-                .find(|(_, a)| a.path.is_ident("field"))
-            {
-                method.attrs.remove(idx);
+                remove_field_attr(&mut method.attrs);
+            } else {
+                remove_field_attr(&mut method.attrs);
             }
         }
     }
@@ -406,6 +439,7 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
             }
 
             fn create_type_info(registry: &mut #crate_name::registry::Registry) -> String {
+                #(#registry_flatten_types)*
                 let ty = registry.create_type::<Self, _>(|registry| #crate_name::registry::Type::Object {
                     name: #gql_typename.to_string(),
                     description: #desc,
