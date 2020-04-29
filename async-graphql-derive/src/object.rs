@@ -429,7 +429,6 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
 
     find_entities.sort_by(|(a, _), (b, _)| b.cmp(a));
     let find_entities_iter = find_entities.iter().map(|(_, code)| code);
-
     let expanded = quote! {
         #item_impl
 
@@ -490,5 +489,6 @@ pub fn generate(object_args: &args::Object, item_impl: &mut ItemImpl) -> Result<
             }
         }
     };
+
     Ok(expanded.into())
 }

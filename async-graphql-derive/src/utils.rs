@@ -175,12 +175,14 @@ pub fn parse_validator(crate_name: &TokenStream, args: &MetaList) -> Result<Toke
     Ok(quote! {None})
 }
 
-pub fn remove_field_attr(attrs: &mut Vec<Attribute>) {
+pub fn remove_field_attr(attrs: &mut Vec<Attribute>) -> Option<Attribute> {
     if let Some((idx, _)) = attrs
         .iter()
         .enumerate()
         .find(|(_, a)| a.path.is_ident("field"))
     {
-        attrs.remove(idx);
+        Some(attrs.remove(idx))
+    } else {
+        None
     }
 }

@@ -27,6 +27,7 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
         .map(|s| quote! { Some(#s) })
         .unwrap_or_else(|| quote! {None});
 
+    let mut registry_flatten_types = Vec::new();
     let mut resolvers = Vec::new();
     let mut schema_fields = Vec::new();
     let fields = match &mut s.fields {
@@ -73,6 +74,30 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
                         }
                     }
                 };
+
+                if field.flatten {
+                    registry_flatten_types.push(quote! {
+                        <#ty as #crate_name::Type>::create_type_info(registry);
+                    });
+
+                    schema_fields.push(quote! {
+                        if let Some(#crate_name::registry::Type::Object{ fields: inner_fields, ..}) = registry.types.get(<#ty as #crate_name::Type>::type_name().as_ref()) {
+                            fields.extend(inner_fields.clone());
+                        }
+                    });
+
+                    let ident = &item.ident;
+                    resolvers.push(quote! {
+                        if let Some(#crate_name::registry::Type::Object{ fields: inner_fields, ..}) = ctx.registry.types.get(<#ty as #crate_name::Type>::type_name().as_ref()) {
+                            if inner_fields.contains_key(ctx.name.as_str()) {
+                                return #crate_name::ObjectType::resolve_field(&self.#ident, ctx).await;
+                            }
+                        }
+                    });
+
+                    remove_field_attr(&mut item.attrs);
+                    continue;
+                }
 
                 schema_fields.push(quote! {
                     fields.insert(#field_name.to_string(), #crate_name::registry::Field {
@@ -122,6 +147,7 @@ pub fn generate(object_args: &args::Object, input: &mut DeriveInput) -> Result<T
             }
 
             fn create_type_info(registry: &mut #crate_name::registry::Registry) -> String {
+                #(#registry_flatten_types)*
                 registry.create_type::<Self, _>(|registry| #crate_name::registry::Type::Object {
                     name: #gql_typename.to_string(),
                     description: #desc,
